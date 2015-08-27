@@ -1,0 +1,722 @@
+
+// ----- Class Timer -----
+class Timer {
+  public:
+     Timer() {_duration = 0; _doneTime=0; _stopped = true;}
+     void set(int duration)    {_duration = duration;} //init
+     void start()  { _doneTime = millis() + _duration; _stopped = false; }//turnOn
+     void reset() { _doneTime = 0; _stopped = true; }//turnOff
+     bool isDone()  { return (millis() >= _doneTime); }//isDone
+     bool isStopped()   {return _stopped;}//isOff
+  private:
+     int _duration; //ms
+     unsigned long _doneTime;
+     bool _stopped;
+};
+
+// ----- Class Http -----
+
+class HttpObj {
+    public:
+        void init(String msg);
+        String run();
+    protected:
+        virtual String _sendRequest();
+    private:
+        char * _request();
+        static const int _maxBuffer = 1024;
+        char _buffer[_maxBuffer];
+        String  _path;
+        const char * _hostname ="demo4462435.mockable.io"; // don't put http:// to avoid bad request error
+        //const char * _hostname ="www.hello-169940.usw1-2.nitrousbox.com"; // "zealinx.meteor.com"
+        TCPClient _client;
+        char _part[_maxBuffer];
+        Timer _delayTimer;
+};
+
+void HttpObj::init(String msg) {
+    // reset timer in a way that that _request is called in first run()
+    _delayTimer.set(0);
+    _delayTimer.start();
+    _delayTimer.set(1000);
+    _path = "/api?msg=" + msg; // change state into msg
+    Serial.println("HttpObj >>> " + _path);
+}
+
+char * HttpObj::_request() {
+  Serial.println("HttpObj >>> resolving host...");
+  if (_client.connected()) {
+         Serial.println("HttpObj >>> connected still!");
+  }else {
+      if (_client.connect(_hostname, 80)) {
+        Serial.println("HttpObj >>> connected!");
+      } else {
+        Serial.println("HttpObj >>> Connection Failed!");
+        _client.stop();
+        return NULL;
+      }
+  }
+  _client.print("GET " + _path + " HTTP/1.1\r\n" + "HOST: " + _hostname + "\r\n\r\n\r\n");
+
+
+  Serial.println("\r\nHttpObj >>> Reading Data......");
+  _buffer[0] = '\0'; // empty buffer
+  bool breakFlag = false;
+  int i,k = 0;
+  uint32_t lastRead = millis();
+  while ((millis() - lastRead) < 1000) {
+    Particle.process();
+    while (_client.available()) {
+      char c = _client.read();
+      Serial.print(c);
+      if(i++ > 100) {
+        delay(100);
+        i = 0;
+      }
+      if (c == -1) break;
+  	  _buffer[k++] = c;
+  	  if( (k == _maxBuffer-2) ){
+            // protocol: json response doesn't contain an array
+        _buffer[k++] = '\0';
+        breakFlag = true;
+        break;
+      }
+      lastRead = millis();
+    }
+    if (breakFlag) break;
+  }
+  Serial.println("\r\nHttpObj >>> Data Read");
+  _client.flush();
+  _client.stop();
+  return _buffer;
+};
+
+String HttpObj::_sendRequest(){
+    const String _success = ",\"status\":\"success\"}";
+    const String _content = "{\"content\":";
+
+    String response = _request();
+    Serial.print("HttpObj >>> _sendRequest >>> " + response);
+    int end =  response.indexOf(_success);
+    if ( end == -1) {
+        // stop client because sometimes _client.connected() is true but connection is lost.
+        _client.stop();
+        _delayTimer.start();
+        return "";
+    } else {
+        _delayTimer.reset();
+        int start = response.indexOf(_content);
+        response =  response.substring(start+11, end);
+        //Serial.println("HttpObj >>> _sendRequest >>> " + response);
+        return response;
+    }
+};
+
+String HttpObj::run() {
+    // timer ensures that if tcpclients fails continusly, we set aside some time for the rest of program
+    // if http works in another thread, timer is not required
+    String response = "";
+    if (!_delayTimer.isStopped()) {
+        if (_delayTimer.isDone()) {
+            response = _sendRequest();
+            //Serial.println("HttpObj >>> run >>> " + response);
+        }
+    }
+    Serial.println("HttpObj >>> run >>> " + response);
+    return response;
+}
+
+// ----- Class Http Simultor-----
+
+class HttpSimulator : public HttpObj{
+    protected:
+        String _sendRequest() {  
+            Serial.println("HttpSimulator >>> _sendRequest >>> ");
+            return "OK";
+        }
+};
+
+
+// ----- Class BlockDriver -----
+class BlockDriver{
+  public:
+    BlockDriver(int masterChipCode, byte port);
+    virtual bool blockReady();
+    virtual String getStatus();
+    virtual byte getEvent();
+    virtual void run();
+    String getConfig();
+    void setAction( byte actionNumber );
+  protected:
+    const byte NONE = 0;
+    byte _port;
+    byte _hwID;
+    byte _fwID;
+    byte _actionNumber;
+    bool _ready;
+};
+
+BlockDriver::BlockDriver(int masterChipCode, byte port){
+    // _hwID and _fwID are larger than 0 if block is ready
+    _port = port;
+    _hwID = NONE;
+    _fwID = NONE;
+    _actionNumber = NONE;
+    _ready = false;
+}
+
+bool BlockDriver::blockReady() {
+    // rewrite for actual  drive
+    Serial.println("BlockDriver >>> blockReady >>> port=" + String(_port));
+    _ready = true;
+    return _ready;
+}
+
+String BlockDriver::getStatus(){
+    // String() is required to direct compliler for type conversion
+    String status = String("{\"hwID\":") + _hwID + ",\"fwID\":" + _fwID;
+    if (!_ready) status += ",\"error\":\"notReady\"";
+    // talk with block
+    status += "}";
+    return status;
+}
+
+byte BlockDriver::getEvent(){
+    Serial.println("BlockDriver >>> getEvent >>>");
+    return 1;
+}
+
+void BlockDriver::run(){
+    Serial.println("BlockDriver >>> run >>> port=" + String(_port));
+    delay(10);
+}
+
+String BlockDriver::getConfig(){
+    _ready = false; // force driver to talk with block
+    blockReady();
+    return String("{\"port\":") + _port + ",\"hwID\":" + _hwID + ",\"fwID\":" + _fwID + "}";
+}
+
+void BlockDriver::setAction( byte actionNumber ){
+    Serial.println("BlockDriver >>> setAction >>> actionNumber=" + String(actionNumber) );
+    _actionNumber = actionNumber;
+}
+
+// ----- Class BlockDriverHW -----
+class BlockDriverHW : public BlockDriver{
+    public:
+        BlockDriverHW(int masterChipCode, byte port):BlockDriver(masterChipCode, port){};
+        void run(){
+            Serial.println("BlockDriverHW >>> run >>> port=" + String(_port));
+            delay(10);
+        }
+    protected:
+        byte statusCommand(byte command){
+            // status command must be less than 7 because 7 is reserved by Connection
+            // 7 puts slave in tristate and there's no reply
+            Serial.println("BlockDriver >>> statusCommand >>>");
+            return 0;
+        }
+        bool orderCommand(byte command){
+            Serial.println("BlockDriver >>> orderCommand");
+            return 0;
+        }
+};
+
+// ----- Class PhotonDriver -----
+class PhotonDriver : public BlockDriver{
+    public:
+        PhotonDriver(int masterChipCode, byte port):BlockDriver(masterChipCode, port){
+            // _hwID and _fwID are larger than 0 if block is ready
+            _port = 0;
+            _hwID = 2;
+            _fwID = 1;
+            _actionNumber = NONE;
+            _ready = false;
+        }        
+        void run(){
+            Serial.println("PhotonDriver >>> run >>> port=" + String(_port));
+            delay(10);
+        }
+};
+
+
+// ----- Class BlockDriverBook -----
+
+class BlockDriverBook{
+    public: 
+        static BlockDriver * fetchDriver(byte driver_port, byte driver_ID, int masterChipCode);
+};
+
+BlockDriver * BlockDriverBook::fetchDriver(byte driver_port, byte driver_ID, int masterChipCode) {
+    int c = masterChipCode;
+    byte p = driver_port;
+    switch(driver_ID) {
+        case 0:  return new BlockDriver(c,p);   
+        case 1:  
+        case 2:     
+        case 3:     
+        case 4:     
+        case 5:     
+        case 6:     
+        case 7:  return new BlockDriverHW(c,p);
+    }
+}
+
+// ----- Base BaseApp Class -----
+
+class StateMachine {
+    public:
+        virtual bool run()=0;
+        int cloudEvent(String event);
+        String serialInput();
+    protected:
+        static const byte NONE = 255;
+        static const int CONFIG_ADDRESS = 0;
+        static const int CONFIG_LENGTH = 500;
+        static const int PROGRAM_ADDRESS = 600;
+        static const int PROGRAM_LENGTH = 1400;
+        static const int OK = 200;
+        static const int NOT_FOUND = 404;
+        static const int PHOTON_CHIP = 1; // Photon chip code
+        const String CONFIG_MSG_KEY = "config";
+        const String PROGRAM_MSG_KEY = "program";
+        const String STATUS_MSG_KEY = "status";
+        byte _state;
+        byte _event;
+        byte _cloudEvent;
+        virtual void setEvent()=0;
+        virtual bool transition()=0;
+        String publish(String field, String value);
+        void writeWord( int address, String word);
+        String readWord( int address, int length);
+        void deleteWord( int address, int length);
+        String extractData(int address, int length, String eof);
+    private:
+        HttpObj _http;
+        String bsonDate(int now);
+};
+
+String StateMachine::serialInput() {
+    String inputWord = "";
+    char inputChar;
+    
+    Serial.println("");
+    Serial.print("INPUT?");
+    do {
+        while (!Serial.available()) {
+            Particle.process();
+        }
+        inputChar = Serial.read();
+        if (inputChar!=' '){
+            Serial.print(inputChar);
+            inputWord += inputChar;
+        }
+    } while (inputChar!=' ');
+    Serial.println("");
+    return inputWord;
+}
+
+void StateMachine::writeWord( int address, String word) {
+    int length = word.length()+1;
+    uint8_t buffer[length];
+    word.getBytes(buffer, length);
+    for(int i=0; i<=length; i++ ){
+        EEPROM.write(address+i, buffer[i] );
+    }
+}
+
+void StateMachine::deleteWord( int address, int length) {
+     for(int i=0; i<=length; i++ )
+        EEPROM.write(address+i, ' ' );
+}
+
+
+String StateMachine::readWord( int address, int length) {
+    char charWord[length];
+    for(int i=0; i<length; i++ ){
+        charWord[i] = EEPROM.read(address+i);
+    }
+    String word(charWord);
+    return word;
+}
+
+
+String StateMachine::extractData(int address, int length, String eof){
+    // extract string that ends with }]}
+    String str = readWord( address, length);
+    Serial.println("SetupClass >>> str >>> " + str);
+    int pos = str.indexOf(eof);
+    if (pos==-1)
+        str =""; // no config has been saved
+    else
+        str = str.substring(0,pos+ eof.length()); // we have to trim it.there could be garbage after it
+    return str;
+}    
+
+String StateMachine::bsonDate(int now) {
+    static unsigned long lastMillis;
+    static int lastNow;
+    int milli = (millis()-lastMillis) - (now-lastNow)*1000;
+    if (milli>1000) milli = milli % 1000;
+    if (milli<0) milli=0;
+    lastMillis = milli;
+    lastNow = now;
+    // make BSON date
+    char date[22];
+    if (milli>99) sprintf(date,"%u%u", now, milli);
+    else if (milli>9) sprintf(date,"%u0%u", now, milli);
+    else sprintf(date,"%u00%u", now, milli);
+    
+    String strDate(date);
+    return strDate;
+}
+
+String StateMachine::publish(String header, String content) {
+    // check content change
+    static uint32_t serialNumber = 0;
+    static String lastContent;
+    if (content != lastContent) {
+        lastContent = content;
+        String message = "{\"deviceID\":\"" + Particle.deviceID() + "\",\"date\":" + bsonDate(Time.now()) 
+        + ",\"msgSerialNum\":" + serialNumber + ",\"header\":\"" + header + "\",\"content\":" + content + "}";
+        Serial.println("BaseApp >>> " + message);
+        _http.init(message);
+        serialNumber++;
+    }
+    return _http.run();
+}
+  
+
+int StateMachine::cloudEvent(String event) {
+    Serial.println("webRequest: " + event);
+    _cloudEvent = event.toInt();
+    return OK;
+}
+
+// ----- Class BootloaderSM -----
+
+class BootloaderSM : public StateMachine {
+    public:
+        BootloaderSM( String fwID);
+        bool run();
+    private:
+        String _fwID;
+        String _config;
+        bool transition();
+        void setEvent();
+        String getConfig();
+};
+
+BootloaderSM::BootloaderSM( String fwID) {
+    _fwID = fwID;
+    _state = 1;
+    _event = NONE;
+    _cloudEvent = NONE;
+}
+
+bool BootloaderSM::run() {
+    setEvent();
+    return transition(); 
+} 
+
+bool BootloaderSM::transition() {
+    static String msg;
+    Serial.print("BootloaderSM >>> _state >>>");Serial.println(String(_state));
+    Serial.print("BootloaderSM >>> _event >>>");Serial.println(_event);
+    switch (_state){
+        case 1 :
+            {//State = checkConfig
+                _config = "" + getConfig();
+                Serial.println("BootloaderSM >>> _config >>>" + _config);
+                String savedConfig = extractData( CONFIG_ADDRESS, CONFIG_LENGTH, "}]}");
+                Serial.println("BootloaderSM >>> savedConfig >>>" + savedConfig);
+                if (_config==savedConfig)
+                    //"configMatch"
+                    _state = 3;
+                else {
+                    //"configMismatch"
+                    deleteWord( PROGRAM_ADDRESS, PROGRAM_LENGTH); // delete program
+                    msg = _config;
+                    _state = 2;
+                    _event = NONE;
+                }
+            }
+            break;
+        case 2 :
+            {//State = checkFW
+                switch (_event){
+                    case 1:
+                        // "reset"
+                        System.reset();
+                    case 2:
+                        {// "rescan"
+                            deleteWord( CONFIG_ADDRESS, CONFIG_LENGTH);// delete config
+                            _state = 1;
+                        }
+                        break;
+                    case 3:
+                        {//fwOK
+                            writeWord( CONFIG_ADDRESS, _config);// save config
+                            _state = 1;
+                        }
+                        break;
+                    default :
+                        publish( CONFIG_MSG_KEY , msg );
+                }
+            }
+            break;
+        case 3 :
+            {//State = checkProgram
+                String savedProgram = extractData( PROGRAM_ADDRESS, PROGRAM_LENGTH, "]]");
+                Serial.println("BootloaderSM >>> savedProgram >>> " + savedProgram);
+                if (savedProgram=="") {
+                    // "noProgram"
+                    _state = byte(4);
+                    msg = "{}";
+                } else
+                    // "programOK"
+                    return true;
+            }
+            break;
+        case 4 :
+            {//State = "installProgram"
+                String program = publish( PROGRAM_MSG_KEY , msg );
+                Serial.println("BootloaderSM >>> program >>> " + program);
+                if (program!="") {
+                    // "programOK"
+                    writeWord( PROGRAM_ADDRESS, program);
+                    _state = byte(3);
+                } 
+                // else publish again
+            }
+    }      
+    return false; 
+}    
+
+
+void BootloaderSM::setEvent() {
+    Serial.print("BootloaderSM >>> _state >>>");Serial.println(_state);
+    Serial.print("BootloaderSM >>> _event >>>");Serial.println(_event);
+    _event = _cloudEvent;
+    _cloudEvent = NONE;
+    String input = serialInput();
+    _event = input.toInt();
+}    
+
+String BootloaderSM::getConfig() {
+    // port 0 is virtual and refers to control block itself
+    // port 1 to 6 are actual ports
+    String config = "{[{\"port\":0,\"hwID\":\"" + System.deviceID() + "\",\"fwID\":" + _fwID + "}"; 
+    for( int port = 1; port < 7; port++ ) {
+        BlockDriver Block(PHOTON_CHIP, port);
+        Block.blockReady();
+        config += "," + Block.getConfig();
+    }
+    config += "]}";
+    return config;
+}
+
+// ----- Class ProgramSM -----
+
+class ProgramSM : public StateMachine {
+    public:
+        ProgramSM( String fwID);
+        bool run();
+    private:
+        static const byte MAX_DRIVER = 2; // 0 to 9 driver may be logical like led driver 
+        static const byte MAX_ROW = 12; // 0 to maxProgramLine - 1
+        static const byte MAX_COLUMN = 6; // 0 to 5
+        static const byte CONTROLLER_PORT = 0; // 0 to 5
+        byte _event_port;
+        bool _programLoaded = false;
+        byte driverID[ MAX_DRIVER ]; 
+        byte stateTable[ MAX_ROW ][ MAX_COLUMN ]; // 50 rows of program
+        String getStatus();
+        bool transition();
+        void setEvent();
+        void loadProgram();
+        void doAction();
+        BlockDriver * driver[ MAX_DRIVER ];
+};
+
+ProgramSM::ProgramSM( String fwID) {
+    _state = 1;
+    _event = NONE;
+    _cloudEvent = NONE;
+    // init arrays
+    for (byte port=0; port< MAX_DRIVER; port++) 
+        driverID[port] = NONE;
+    for (byte i=0; i < MAX_ROW; i++)
+        for (byte j=0; j < MAX_COLUMN; j++) 
+            stateTable[i][j] = NONE;
+}
+
+void ProgramSM::loadProgram() {
+    // parse program
+    String program = extractData( PROGRAM_ADDRESS, PROGRAM_LENGTH, "]]");
+        Serial.println("ProgramSM >>> program >>> " + program);
+    program = program.substring(1, program.length()-1);
+        Serial.println("ProgramSM >>> program >>> " + program);
+    int row = -1;
+    do {
+        int arrayStart = program.indexOf("[") + 1;
+        int arrayEnd = program.indexOf("]");
+        String csv = program.substring( arrayStart , arrayEnd );
+        Serial.println("ProgramSM >>> csv >>> " + csv);
+        program = program.substring(arrayEnd+2);
+        Serial.println("ProgramSM >>> program >>> " + program);
+        
+        byte column = 0;
+        do {
+            int comma = csv.indexOf(",");
+            int next = (comma==-1) ? csv.length(): comma ;
+            String numberStr = csv.substring(0,next); 
+            byte number = numberStr.toInt();
+            // first array defines drivers the rest define transitions and actions
+            if (row==-1)
+                driverID[column] = number;
+            else
+                stateTable[row][column] = number;
+            if (comma==-1) break;
+            csv = csv.substring(comma+1);
+            if (column < MAX_COLUMN) column++;
+        } while (true);
+        if (row < MAX_ROW) row++;
+
+    } while (program.length()>0);
+
+    // load drivers
+    byte port = 0;
+    //static BlockDriver BB( port, driverID[port] );
+    //BlockDriver * bb = new BlockDriver( port, driverID[port] );//&BB;
+    while ( (port < MAX_DRIVER) && (driverID[port] != NONE) ){
+        driver[port] = BlockDriverBook::fetchDriver( port, driverID[port], PHOTON_CHIP );
+        driver[port]->blockReady();
+        port++;
+    }
+    _programLoaded = true;
+    
+    // print arrays
+    for (byte port=0; port< MAX_DRIVER; port++) 
+        Serial.print( " " + String(driverID[port]) );
+    for (byte i=0; i < MAX_ROW; i++){
+        Serial.println();   
+        for (byte j=0; j < MAX_COLUMN; j++) 
+            Serial.print( " " + String(stateTable[i][j]) );
+    }
+    Serial.println();
+    Serial.println("ProgramSM >>> loadProgram >>> Done");
+}
+
+void ProgramSM::doAction() {
+    for ( byte port=0; port < MAX_DRIVER; port++)
+        driver[port]->run();
+}
+
+String ProgramSM::getStatus() {
+    String status = "{["; 
+    for ( byte port=0; port < MAX_DRIVER; port++) {
+        if (port>0) status += String(",");
+        status += driver[port]->getEvent();
+    }
+    status += String("]}");
+    return status;
+}    
+
+bool ProgramSM::transition() {
+    static const byte STATE1=0 , EVENT_PORT=1, EVENT_NUMBER=2, STATE2=3,  ACTION_DRIVER_PORT=4, ACTION_NUMBER=5;
+    byte row=0;
+    byte newState = _state;
+    while ( (row < MAX_ROW) && (stateTable[row][STATE1] != NONE) ) {
+        if ( stateTable[row][STATE1] == _state )
+            if ( stateTable[row][EVENT_PORT] == _event_port )
+                if ( stateTable[row][EVENT_NUMBER] == _event ) {
+                    newState = stateTable[row][STATE2];
+                    byte port = stateTable[row][ACTION_DRIVER_PORT];
+                    byte actionNumber = stateTable[row][ACTION_NUMBER];
+                    driver[ port ]->setAction( actionNumber );
+                    
+                    Serial.println("ProgramSM >>> transition >>> newState=" + String(newState) );
+                    Serial.println("ProgramSM >>> transition >>> port=" + String(port) );
+                    Serial.println("ProgramSM >>> transition >>> actionNumber=" + String(actionNumber) ); 
+                }
+        row++;
+    }
+    _state = newState;
+    Serial.println("ProgramSM >>> transition >>> done"); 
+ 
+    
+    return true; // true means remain in ProgramState
+}    
+
+void ProgramSM::setEvent() {
+    _event = NONE;
+    _event_port = NONE;
+    
+    for ( byte port =0; port < MAX_DRIVER; port++) {
+        byte event = driver[port]->getEvent();
+        if (event!=NONE) {
+            _event = event;
+            _event_port = port;
+        }
+    }
+    if (_cloudEvent != NONE) {
+        _event = _cloudEvent;
+        _event_port = CONTROLLER_PORT;
+        _cloudEvent = NONE;
+    }
+    
+    //  These 3 lines are for test only
+    //String input = serialInput();
+    //_event = input.toInt();
+    //_event_port = 0;
+    _event = random(2);
+    _event_port = 0;
+    //----------- manual test -----------
+}    
+
+bool ProgramSM::run() {
+    if (!_programLoaded) loadProgram();
+    doAction();
+    Serial.println("ProgramSM >>> doAction >>> Done");
+    setEvent();
+    Serial.println("ProgramSM >>> setEvent >>> Done");
+    publish( STATUS_MSG_KEY, getStatus() );
+    Serial.println("ProgramSM >>> run >>> state=" + String(_state) );
+    Serial.println("ProgramSM >>> run >>> event=" + String(_event) );
+    Serial.println("ProgramSM >>> run >>> _event_port=" + String(_event_port) );
+    return transition(); 
+}    
+
+
+// -------------------------- Main State Machine ------------------------------
+
+const String fwID ="1234567701";//FW installed on conrtroller Block
+bool ProgramState = false ;
+
+BootloaderSM Bootloader(fwID);
+ProgramSM Program(fwID);
+
+int cloudEvent(String event){
+    if (ProgramState)
+        return Program.cloudEvent(event);
+    else
+        return Bootloader.cloudEvent(event);
+}
+
+void setup() {
+    Particle.function("webReq", cloudEvent);
+
+    Serial.begin(9600);
+    while (!Serial.available()) Particle.process();
+    Serial.println("setup end");
+}
+
+void loop() {
+    delay(10);
+    if (ProgramState)
+        ProgramState = Program.run();
+    else
+        ProgramState = Bootloader.run();
+}
